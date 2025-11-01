@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
@@ -23,7 +24,7 @@ namespace {
 
   Preferences prefs;
   WebServer server(80);
-  WiFiClient wifiClient;
+  WiFiClientSecure wifiClient;
 
   String wifiSsid;
   String wifiPass;
@@ -394,6 +395,7 @@ static void setupServer() {
 void setup() {
   Serial.begin(115200);
   delay(200);
+  wifiClient.setInsecure(); // Accept all certificates for HTTPS requests
 
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(LED_PIN, OUTPUT);
