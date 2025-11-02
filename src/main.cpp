@@ -13,6 +13,8 @@
 #define AP_PASS "12345678"           // ✅ Cambia la contraseña si deseas
 #define RELAY_PIN 2                   // ⚠️ Pon aquí el pin de tu relé
 #define LED_PIN 4                     // ⚠️ Pon aquí el pin de tu LED indicador
+#define DEFAULT_WIFI_SSID "ESP-13K029"
+#define DEFAULT_SERVER_URL "https://proyecto.bisonbyte.io"
 // ===================================
 
 namespace {
@@ -311,13 +313,13 @@ static String renderRootPage() {
 
   html += "<section><h2>Configurar WiFi y servidor</h2><form method='POST' action='/configure'>";
   html += "<label for='ssid'>WiFi SSID</label><input id='ssid' name='ssid' required value='";
-  html += htmlEscape(wifiSsid);
+  html += htmlEscape(wifiSsid.isEmpty() ? DEFAULT_WIFI_SSID : wifiSsid);
   html += "'>";
   html += "<label for='pass'>WiFi Password</label><input id='pass' name='pass' type='password' value='";
   html += htmlEscape(wifiPass);
   html += "'>";
   html += "<label for='server'>URL del servidor Laravel</label><input id='server' name='server' required value='";
-  html += htmlEscape(serverUrl);
+  html += htmlEscape(serverUrl.isEmpty() ? DEFAULT_SERVER_URL : serverUrl);
   html += "'>";
   html += "<button type='submit'>Guardar y conectar</button></form></section>";
 
