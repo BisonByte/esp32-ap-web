@@ -9,24 +9,40 @@
 #include <ArduinoJson.h>
 
 // ========== CONFIGURACIÓN ==========
+#ifndef AP_SSID
 #define AP_SSID "BisonByte-Setup"   // ✅ Cambia el nombre si quieres
+#endif
+#ifndef AP_PASS
 #define AP_PASS "12345678"           // ✅ Cambia la contraseña si deseas
+#endif
+#ifndef RELAY_PIN
 #define RELAY_PIN 2                   // ⚠️ Pon aquí el pin de tu relé
+#endif
+#ifndef LED_PIN
 #define LED_PIN 4                     // ⚠️ Pon aquí el pin de tu LED indicador
+#endif
+#ifndef DEFAULT_WIFI_SSID
 #define DEFAULT_WIFI_SSID "ESP-13K029"
+#endif
+#ifndef DEFAULT_WIFI_PASS
+#define DEFAULT_WIFI_PASS ""         // ⚠️ Si conoces la clave, configúrala aquí
+#endif
+#ifndef DEFAULT_SERVER_URL
 #define DEFAULT_SERVER_URL "https://proyecto.bisonbyte.io"
+#endif
 // ===================================
 
 namespace {
   constexpr unsigned long WIFI_TIMEOUT = 20000;   // 20 segundos para conectar
-  constexpr unsigned long CHECK_INTERVAL = 2000;  // Consultar estado cada 2 s
+  constexpr unsigned long CHECK_INTERVAL = 2000;  // Consultar estado cada 2 s (por defecto)
   constexpr unsigned long TELEMETRY_INTERVAL = 15000; // Telemetría cada 15 s
   constexpr size_t SMALL_JSON_CAPACITY = 512;
   constexpr size_t TELEMETRY_JSON_CAPACITY = 768;
 
   Preferences prefs;
   WebServer server(80);
-  WiFiClientSecure wifiClient;
+  WiFiClient plainClient;
+  WiFiClientSecure secureClient;
 
   String wifiSsid;
   String wifiPass;
@@ -34,6 +50,11 @@ namespace {
   String deviceToken;
   String deviceName = "Bomba ESP32";
   uint32_t deviceId = 0;
+
+  // Directivas del servidor (config importada del backend)
+  String stateEndpointOverride;
+  String telemetryEndpointOverride;
+  unsigned long checkIntervalMs = CHECK_INTERVAL;
 
   bool apMode = false;
   bool reconnectRequested = false;
@@ -49,6 +70,14 @@ static String joinUrl(const String& base, const String& path) {
   return base + path;
 }
 
+static void httpBegin(HTTPClient& http, const String& url) {
+  if (url.startsWith("https://")) {
+    http.begin(secureClient, url);
+  } else {
+    http.begin(plainClient, url);
+  }
+}
+
 static void setRelay(bool enabled) {
   digitalWrite(RELAY_PIN, enabled ? HIGH : LOW);
   digitalWrite(LED_PIN, enabled ? HIGH : LOW);
@@ -61,6 +90,57 @@ static void loadPreferences() {
   serverUrl = prefs.getString("server_url", "");
   deviceToken = prefs.getString("device_token", "");
   deviceId = prefs.getUInt("device_id", 0);
+  stateEndpointOverride = prefs.getString("state_url", "");
+  telemetryEndpointOverride = prefs.getString("telemetry_url", "");
+  checkIntervalMs = prefs.getUInt("check_ms", CHECK_INTERVAL);
+
+  // Primer arranque: aplica valores por defecto si están definidos
+  bool changed = false;
+  if (!wifiSsid.length() && String(DEFAULT_WIFI_SSID).length()) {
+    wifiSsid = DEFAULT_WIFI_SSID;
+    prefs.putString("wifi_ssid", wifiSsid);
+    changed = true;
+  }
+  if (!wifiPass.length() && String(DEFAULT_WIFI_PASS).length()) {
+    wifiPass = DEFAULT_WIFI_PASS;
+    prefs.putString("wifi_pass", wifiPass);
+    changed = true;
+  }
+  if (!serverUrl.length() && String(DEFAULT_SERVER_URL).length()) {
+    serverUrl = DEFAULT_SERVER_URL;
+    prefs.putString("server_url", serverUrl);
+    changed = true;
+  }
+#ifdef OVERRIDE_NVS_WITH_DEFAULTS
+  // Fuerza la importación desde las defines de compilación en cada arranque
+  bool forced = false;
+  if (String(DEFAULT_WIFI_SSID).length() && wifiSsid != String(DEFAULT_WIFI_SSID)) {
+    wifiSsid = DEFAULT_WIFI_SSID;
+    prefs.putString("wifi_ssid", wifiSsid);
+    forced = true;
+  }
+  if (String(DEFAULT_WIFI_PASS).length() && wifiPass != String(DEFAULT_WIFI_PASS)) {
+    wifiPass = DEFAULT_WIFI_PASS;
+    prefs.putString("wifi_pass", wifiPass);
+    forced = true;
+  }
+  if (String(DEFAULT_SERVER_URL).length() && serverUrl != String(DEFAULT_SERVER_URL)) {
+    serverUrl = DEFAULT_SERVER_URL;
+    prefs.putString("server_url", serverUrl);
+    forced = true;
+  }
+  if (forced) {
+    // Reinicia el registro si cambió conectividad
+    prefs.remove("device_token");
+    prefs.putUInt("device_id", 0);
+    deviceToken = "";
+    deviceId = 0;
+    Serial.println("Preferencias forzadas desde build (OVERRIDE_NVS_WITH_DEFAULTS).");
+  }
+#endif
+  if (changed) {
+    Serial.println("Preferencias iniciales aplicadas desde valores por defecto.");
+  }
 }
 
 static void saveWiFiConfig(const String& ssid, const String& pass, const String& url) {
@@ -81,6 +161,21 @@ static void saveWiFiConfig(const String& ssid, const String& pass, const String&
 static void saveDeviceState() {
   prefs.putString("device_token", deviceToken);
   prefs.putUInt("device_id", deviceId);
+}
+
+static void saveServerDirectives(const String& stateUrl, const String& telemetryUrl, unsigned long pollSeconds) {
+  if (stateUrl.length()) {
+    stateEndpointOverride = stateUrl;
+    prefs.putString("state_url", stateEndpointOverride);
+  }
+  if (telemetryUrl.length()) {
+    telemetryEndpointOverride = telemetryUrl;
+    prefs.putString("telemetry_url", telemetryEndpointOverride);
+  }
+  if (pollSeconds > 0) {
+    checkIntervalMs = pollSeconds * 1000UL;
+    prefs.putUInt("check_ms", checkIntervalMs);
+  }
 }
 
 static void startAccessPoint() {
@@ -170,7 +265,7 @@ static void registerDevice() {
   serializeJson(doc, payload);
 
   Serial.println("Registrando dispositivo...");
-  http.begin(wifiClient, url);
+  httpBegin(http, url);
   http.addHeader("Content-Type", "application/json");
   const int httpCode = http.POST(payload);
   const String response = http.getString();
@@ -179,7 +274,7 @@ static void registerDevice() {
     Serial.println("✓ Dispositivo registrado!");
     Serial.println(response);
 
-    DynamicJsonDocument res(SMALL_JSON_CAPACITY);
+    DynamicJsonDocument res(1024);
     DeserializationError err = deserializeJson(res, response);
     if (!err) {
       deviceToken = res["token"].as<String>();
@@ -190,6 +285,18 @@ static void registerDevice() {
       Serial.println(deviceId);
       Serial.print("Token: ");
       Serial.println(deviceToken);
+
+      // Importar configuración del backend (endpoints y frecuencia)
+      if (res.containsKey("http")) {
+        JsonObject httpCfg = res["http"].as<JsonObject>();
+        const String stateUrl = httpCfg["state"].as<String>();
+        const String telemetryUrl = httpCfg["telemetry"].as<String>();
+        const unsigned long pollSeconds = httpCfg["poll_seconds"] | (checkIntervalMs / 1000UL);
+        saveServerDirectives(stateUrl, telemetryUrl, pollSeconds);
+        Serial.print("HTTP state endpoint: "); Serial.println(stateEndpointOverride.length()? stateEndpointOverride : "(default)");
+        Serial.print("HTTP telemetry endpoint: "); Serial.println(telemetryEndpointOverride.length()? telemetryEndpointOverride : "(default)");
+        Serial.print("Poll interval (ms): "); Serial.println(checkIntervalMs);
+      }
     } else {
       Serial.print("✗ Error parseando respuesta de registro: ");
       Serial.println(err.c_str());
@@ -208,10 +315,14 @@ static void checkPumpState() {
   if (deviceId == 0 || WiFi.status() != WL_CONNECTED || !serverUrl.length()) return;
 
   HTTPClient http;
-  String url = joinUrl(serverUrl, "/api/pump/state");
-  url += "?device_id=" + String(deviceId);
+  auto addQuery = [](const String& base, const String& key, const String& value) -> String {
+    return base + (base.indexOf('?') >= 0 ? '&' : '?') + key + "=" + value;
+  };
 
-  http.begin(wifiClient, url);
+  String baseUrl = stateEndpointOverride.length() ? stateEndpointOverride : joinUrl(serverUrl, "/api/pump/state");
+  String url = addQuery(baseUrl, "device_id", String(deviceId));
+
+  httpBegin(http, url);
   if (deviceToken.length()) {
     http.addHeader("Authorization", String("Bearer ") + deviceToken);
   }
@@ -244,7 +355,7 @@ static void sendTelemetry() {
   if (deviceId == 0 || WiFi.status() != WL_CONNECTED || !serverUrl.length()) return;
 
   HTTPClient http;
-  const String url = joinUrl(serverUrl, "/api/telemetry");
+  const String url = telemetryEndpointOverride.length() ? telemetryEndpointOverride : joinUrl(serverUrl, "/api/telemetry");
 
   DynamicJsonDocument doc(TELEMETRY_JSON_CAPACITY);
   doc["device_id"] = deviceId;
@@ -256,7 +367,7 @@ static void sendTelemetry() {
   String payload;
   serializeJson(doc, payload);
 
-  http.begin(wifiClient, url);
+  httpBegin(http, url);
   http.addHeader("Content-Type", "application/json");
   if (deviceToken.length()) {
     http.addHeader("Authorization", String("Bearer ") + deviceToken);
@@ -330,6 +441,12 @@ static String renderRootPage() {
   html += String(deviceId);
   html += "</li><li><strong>Token:</strong> ";
   html += htmlEscape(deviceToken);
+  html += "</li><li><strong>Estado endpoint:</strong> <code>";
+  html += htmlEscape(stateEndpointOverride.length()? stateEndpointOverride : joinUrl(serverUrl, "/api/pump/state"));
+  html += "</code></li><li><strong>Telemetría endpoint:</strong> <code>";
+  html += htmlEscape(telemetryEndpointOverride.length()? telemetryEndpointOverride : joinUrl(serverUrl, "/api/telemetry"));
+  html += "</code></li><li><strong>Poll (ms):</strong> ";
+  html += String(checkIntervalMs);
   html += "</li></ul></section>";
 
   html += "<section><h2>Estado del relé</h2><p>Actualmente: <strong>";
@@ -397,7 +514,7 @@ static void setupServer() {
 void setup() {
   Serial.begin(115200);
   delay(200);
-  wifiClient.setInsecure(); // Accept all certificates for HTTPS requests
+  secureClient.setInsecure(); // Accept all certificates for HTTPS requests
 
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(LED_PIN, OUTPUT);
@@ -428,12 +545,12 @@ void loop() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    if (deviceId == 0 && (millis() - lastCheck) > CHECK_INTERVAL) {
+    if (deviceId == 0 && (millis() - lastCheck) > checkIntervalMs) {
       lastCheck = millis();
       registerDevice();
     } else if (deviceId != 0) {
       const unsigned long now = millis();
-      if (now - lastCheck > CHECK_INTERVAL) {
+      if (now - lastCheck > checkIntervalMs) {
         lastCheck = now;
         checkPumpState();
       }
@@ -444,4 +561,3 @@ void loop() {
     }
   }
 }
-
