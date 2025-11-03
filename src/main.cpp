@@ -58,7 +58,7 @@ static void loadPreferences() {
   prefs.begin("bisonbyte", false);
   wifiSsid = prefs.getString("wifi_ssid", "");
   wifiPass = prefs.getString("wifi_pass", "");
-  serverUrl = prefs.getString("server_url", "http://192.168.1.100:8000");
+  serverUrl = prefs.getString("server_url", "");
   deviceToken = prefs.getString("device_token", "");
   deviceId = prefs.getUInt("device_id", 0);
 }
@@ -404,11 +404,13 @@ void setup() {
   setRelay(false);
 
   loadPreferences();
-  setupServer();
-
   if (!connectToWiFi()) {
     startAccessPoint();
   }
+
+  // Inicia el servidor web solo después de haber inicializado la pila WiFi
+  // (ya sea en modo STA o AP) para evitar errores de lwIP al arrancar.
+  setupServer();
 }
 
 void loop() {
