@@ -1,5 +1,5 @@
 // ESP32 Access Point + HTTP client example for Laravel backend
-// VERSIÓN CORREGIDA - Control de relé funcional
+// VERSIÓN CORREGIDA - Lógica de relé invertida para 5V
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -24,11 +24,10 @@
 #endif
 
 #ifndef RELAY_ACTIVE_HIGH
-// La mayoría de módulos de relé para ESP32 son ACTIVO-BAJO.
-// 0 = activo en BAJO (IN a LOW enciende el relé) ← TU CASO
-// 1 = activo en ALTO  (IN a HIGH enciende el relé)
-// ⚠️ Si la luz verde no se apaga, usa: http://IP/relay?active_high=0
-#define RELAY_ACTIVE_HIGH 0
+// Módulo de relé alimentado con 5V (VIN) - Lógica ACTIVO-ALTO
+// 0 = activo en BAJO (IN a LOW enciende el relé)
+// 1 = activo en ALTO (IN a HIGH enciende el relé) ← CONFIGURACIÓN CORRECTA PARA 5V
+#define RELAY_ACTIVE_HIGH 1 // <--- ¡ESTE ES EL CAMBIO!
 #endif
 
 // ⚠️ CAMBIO IMPORTANTE: Desactivado por defecto para que el relé funcione
@@ -117,7 +116,7 @@ static void httpBegin(HTTPClient& http, const String& url) {
 
 static inline bool relayIsOn() {
   return relayActiveHighRuntime ? (digitalRead(RELAY_PIN) == HIGH)
-                                : (digitalRead(RELAY_PIN) == LOW);
+                                 : (digitalRead(RELAY_PIN) == LOW);
 }
 
 static void setRelay(bool enabled) {
@@ -166,6 +165,13 @@ static void loadPreferences() {
   checkIntervalMs = prefs.getUInt("check_ms", CHECK_INTERVAL);
   relayActiveHighRuntime = prefs.getBool("relay_ah", RELAY_ACTIVE_HIGH);
   apPersist = prefs.getBool("ap_persist", false);
+
+  // Asegurarse de que el valor de NVS coincida con el #define si es la primera vez
+  if (!prefs.isKey("relay_ah")) {
+      prefs.putBool("relay_ah", RELAY_ACTIVE_HIGH);
+      relayActiveHighRuntime = RELAY_ACTIVE_HIGH;
+  }
+
 
   bool changed = false;
   if (!wifiSsid.length() && String(DEFAULT_WIFI_SSID).length()) {
@@ -444,8 +450,8 @@ static void checkPumpState() {
   };
 
   const String stateDefault = String(DEFAULT_HTTP_STATE_ENDPOINT).length()
-                                 ? DEFAULT_HTTP_STATE_ENDPOINT
-                                 : joinUrl(serverUrl, "/api/pump/state");
+                                    ? DEFAULT_HTTP_STATE_ENDPOINT
+                                    : joinUrl(serverUrl, "/api/pump/state");
   String baseUrl = stateEndpointOverride.length() ? stateEndpointOverride : stateDefault;
   String url = addQuery(baseUrl, "device_id", String(deviceId));
 
@@ -484,8 +490,8 @@ static void sendTelemetry() {
 
   HTTPClient http;
   const String telemetryDefault = String(DEFAULT_HTTP_TELEMETRY_ENDPOINT).length()
-                                      ? DEFAULT_HTTP_TELEMETRY_ENDPOINT
-                                      : joinUrl(serverUrl, "/api/telemetry");
+                                        ? DEFAULT_HTTP_TELEMETRY_ENDPOINT
+                                        : joinUrl(serverUrl, "/api/telemetry");
   const String url = telemetryEndpointOverride.length() ? telemetryEndpointOverride : telemetryDefault;
 
   DynamicJsonDocument doc(TELEMETRY_JSON_CAPACITY);
@@ -537,15 +543,15 @@ static String renderRootPage() {
   const bool wifiConnected = WiFi.status() == WL_CONNECTED;
   const IPAddress ip = wifiConnected ? WiFi.localIP() : WiFi.softAPIP();
   const String stateUrlDisplay = stateEndpointOverride.length()
-                                     ? stateEndpointOverride
-                                     : (String(DEFAULT_HTTP_STATE_ENDPOINT).length()
-                                            ? DEFAULT_HTTP_STATE_ENDPOINT
-                                            : joinUrl(serverUrl, "/api/pump/state"));
+                                   ? stateEndpointOverride
+                                   : (String(DEFAULT_HTTP_STATE_ENDPOINT).length()
+                                        ? DEFAULT_HTTP_STATE_ENDPOINT
+                                        : joinUrl(serverUrl, "/api/pump/state"));
   const String telemetryUrlDisplay = telemetryEndpointOverride.length()
-                                         ? telemetryEndpointOverride
-                                         : (String(DEFAULT_HTTP_TELEMETRY_ENDPOINT).length()
-                                                ? DEFAULT_HTTP_TELEMETRY_ENDPOINT
-                                                : joinUrl(serverUrl, "/api/telemetry"));
+                                       ? telemetryEndpointOverride
+                                       : (String(DEFAULT_HTTP_TELEMETRY_ENDPOINT).length()
+                                            ? DEFAULT_HTTP_TELEMETRY_ENDPOINT
+                                            : joinUrl(serverUrl, "/api/telemetry"));
 
   String html;
   html.reserve(3072);
@@ -663,7 +669,7 @@ static void handleRelay() {
     const bool newVal = (v == "1" || v.equalsIgnoreCase("true"));
     relayActiveHighRuntime = newVal;
     prefs.putBool("relay_ah", relayActiveHighRuntime);
-    setRelay(relayIsOn());
+    setRelay(relayIsOn()); // Re-aplica el estado actual con la nueva lógica
     changed = true;
   }
 
@@ -755,30 +761,31 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   
-  // ⚠️ CRÍTICO: Configura el pin INMEDIATAMENTE después del Serial
-  // para minimizar el tiempo que el relé está en estado indefinido
   pinMode(RELAY_PIN, OUTPUT);
   
-  // Para relé activo-bajo (el más común):
-  // HIGH = apagado (optoacoplador desactivado)
-  // LOW = encendido (optoacoplador activado)
-  // Forzamos HIGH para garantizar que arranca APAGADO
-  digitalWrite(RELAY_PIN, HIGH);
+  // Para relé activo-ALTO con 5V:
+  // LOW = apagado
+  digitalWrite(RELAY_PIN, LOW);
   
-  // Pausa para estabilizar
   delay(100);
   
   Serial.println("\n\n========================================");
   Serial.println("🚀 BisonByte ESP32 - Iniciando...");
+  Serial.println("🔌 Configuración: Relé con VCC=5V (VIN)");
+  Serial.print("🔌 Pin GPIO: ");
+  Serial.println(RELAY_PIN);
+  Serial.println("🔌 Lógica: ACTIVO-ALTO (HIGH=encendido)");
   Serial.println("========================================");
   
   secureClient.setInsecure();
 
-  // Carga preferencias DESPUÉS de asegurar el estado del pin
   loadPreferences();
 
-  // Reaplica el estado apagado según la lógica configurada
-  setRelay(false);
+  setRelay(false); // Asegura que el estado inicial sea APAGADO
+  
+  Serial.print("🔌 Estado inicial del relé: ");
+  Serial.println(relayIsOn() ? "ENCENDIDO ❌" : "APAGADO ✅");
+  Serial.println();
   
   Serial.print("🔌 Pin del relé: GPIO");
   Serial.println(RELAY_PIN);
