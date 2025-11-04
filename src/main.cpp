@@ -8,6 +8,8 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 
+#include "DefaultBackendConfig.h"
+
 // ========== CONFIGURACIÓN ==========
 #ifndef AP_SSID
 #define AP_SSID "BisonByte-Setup"   // ✅ Cambia el nombre si quieres
@@ -21,14 +23,42 @@
 #ifndef LED_PIN
 #define LED_PIN 4                     // ⚠️ Pon aquí el pin de tu LED indicador
 #endif
+// Overrides de pines para esta placa (terminal block):
+#undef RELAY_PIN
+#define RELAY_PIN 26  // D26 / GPIO26 - rele
+#undef LED_PIN  // LED indicador eliminado
+#ifndef RELAY_ACTIVE_HIGH
+#define RELAY_ACTIVE_HIGH 0 // 0 = activo en BAJO (modulos comunes)
+#endif
 #ifndef DEFAULT_WIFI_SSID
-#define DEFAULT_WIFI_SSID "ESP-13K029"
+#define DEFAULT_WIFI_SSID ""          // Defecto vacío: se rellenará desde .env o portal
 #endif
 #ifndef DEFAULT_WIFI_PASS
-#define DEFAULT_WIFI_PASS ""         // ⚠️ Si conoces la clave, configúrala aquí
+#define DEFAULT_WIFI_PASS ""
 #endif
 #ifndef DEFAULT_SERVER_URL
 #define DEFAULT_SERVER_URL "https://proyecto.bisonbyte.io"
+#endif
+#ifndef DEFAULT_HTTP_ACTIVATION_ENDPOINT
+#define DEFAULT_HTTP_ACTIVATION_ENDPOINT ""
+#endif
+#ifndef DEFAULT_HTTP_STATE_ENDPOINT
+#define DEFAULT_HTTP_STATE_ENDPOINT ""
+#endif
+#ifndef DEFAULT_HTTP_SET_ENDPOINT
+#define DEFAULT_HTTP_SET_ENDPOINT ""
+#endif
+#ifndef DEFAULT_HTTP_TELEMETRY_ENDPOINT
+#define DEFAULT_HTTP_TELEMETRY_ENDPOINT ""
+#endif
+#ifndef DEFAULT_ACTIVATION_KEY
+#define DEFAULT_ACTIVATION_KEY ""
+#endif
+#ifndef DEFAULT_DEVICE_ID
+#define DEFAULT_DEVICE_ID 0
+#endif
+#ifndef DEFAULT_HTTP_POLL_SECONDS
+#define DEFAULT_HTTP_POLL_SECONDS 0
 #endif
 // ===================================
 
@@ -78,9 +108,20 @@ static void httpBegin(HTTPClient& http, const String& url) {
   }
 }
 
+static inline bool relayIsOn() {
+#if RELAY_ACTIVE_HIGH
+  return digitalRead(RELAY_PIN) == HIGH;
+#else
+  return digitalRead(RELAY_PIN) == LOW;
+#endif
+}
+
 static void setRelay(bool enabled) {
+#if RELAY_ACTIVE_HIGH
   digitalWrite(RELAY_PIN, enabled ? HIGH : LOW);
-  digitalWrite(LED_PIN, enabled ? HIGH : LOW);
+#else
+  digitalWrite(RELAY_PIN, enabled ? LOW : HIGH);
+#endif
 }
 
 static void loadPreferences() {
@@ -111,6 +152,31 @@ static void loadPreferences() {
     prefs.putString("server_url", serverUrl);
     changed = true;
   }
+  if (deviceId == 0 && DEFAULT_DEVICE_ID > 0) {
+    deviceId = DEFAULT_DEVICE_ID;
+    prefs.putUInt("device_id", deviceId);
+    changed = true;
+  }
+  if (!deviceToken.length() && String(DEFAULT_ACTIVATION_KEY).length()) {
+    deviceToken = DEFAULT_ACTIVATION_KEY;
+    prefs.putString("device_token", deviceToken);
+    changed = true;
+  }
+  if (!stateEndpointOverride.length() && String(DEFAULT_HTTP_STATE_ENDPOINT).length()) {
+    stateEndpointOverride = DEFAULT_HTTP_STATE_ENDPOINT;
+    prefs.putString("state_url", stateEndpointOverride);
+    changed = true;
+  }
+  if (!telemetryEndpointOverride.length() && String(DEFAULT_HTTP_TELEMETRY_ENDPOINT).length()) {
+    telemetryEndpointOverride = DEFAULT_HTTP_TELEMETRY_ENDPOINT;
+    prefs.putString("telemetry_url", telemetryEndpointOverride);
+    changed = true;
+  }
+  if (!prefs.isKey("check_ms") && DEFAULT_HTTP_POLL_SECONDS > 0) {
+    checkIntervalMs = DEFAULT_HTTP_POLL_SECONDS * 1000UL;
+    prefs.putUInt("check_ms", checkIntervalMs);
+    changed = true;
+  }
 #ifdef OVERRIDE_NVS_WITH_DEFAULTS
   // Fuerza la importación desde las defines de compilación en cada arranque
   bool forced = false;
@@ -127,6 +193,21 @@ static void loadPreferences() {
   if (String(DEFAULT_SERVER_URL).length() && serverUrl != String(DEFAULT_SERVER_URL)) {
     serverUrl = DEFAULT_SERVER_URL;
     prefs.putString("server_url", serverUrl);
+    forced = true;
+  }
+  if (String(DEFAULT_HTTP_STATE_ENDPOINT).length() && stateEndpointOverride != String(DEFAULT_HTTP_STATE_ENDPOINT)) {
+    stateEndpointOverride = DEFAULT_HTTP_STATE_ENDPOINT;
+    prefs.putString("state_url", stateEndpointOverride);
+    forced = true;
+  }
+  if (String(DEFAULT_HTTP_TELEMETRY_ENDPOINT).length() && telemetryEndpointOverride != String(DEFAULT_HTTP_TELEMETRY_ENDPOINT)) {
+    telemetryEndpointOverride = DEFAULT_HTTP_TELEMETRY_ENDPOINT;
+    prefs.putString("telemetry_url", telemetryEndpointOverride);
+    forced = true;
+  }
+  if (DEFAULT_HTTP_POLL_SECONDS > 0 && checkIntervalMs != DEFAULT_HTTP_POLL_SECONDS * 1000UL) {
+    checkIntervalMs = DEFAULT_HTTP_POLL_SECONDS * 1000UL;
+    prefs.putUInt("check_ms", checkIntervalMs);
     forced = true;
   }
   if (forced) {
@@ -253,7 +334,9 @@ static void registerDevice() {
   if (!serverUrl.length() || WiFi.status() != WL_CONNECTED) return;
 
   HTTPClient http;
-  const String url = joinUrl(serverUrl, "/api/devices/register");
+  const String url = String(DEFAULT_HTTP_ACTIVATION_ENDPOINT).length()
+                       ? DEFAULT_HTTP_ACTIVATION_ENDPOINT
+                       : joinUrl(serverUrl, "/api/devices/register");
 
   DynamicJsonDocument doc(SMALL_JSON_CAPACITY);
   const String mac = WiFi.macAddress();
@@ -319,7 +402,10 @@ static void checkPumpState() {
     return base + (base.indexOf('?') >= 0 ? '&' : '?') + key + "=" + value;
   };
 
-  String baseUrl = stateEndpointOverride.length() ? stateEndpointOverride : joinUrl(serverUrl, "/api/pump/state");
+  const String stateDefault = String(DEFAULT_HTTP_STATE_ENDPOINT).length()
+                                 ? DEFAULT_HTTP_STATE_ENDPOINT
+                                 : joinUrl(serverUrl, "/api/pump/state");
+  String baseUrl = stateEndpointOverride.length() ? stateEndpointOverride : stateDefault;
   String url = addQuery(baseUrl, "device_id", String(deviceId));
 
   httpBegin(http, url);
@@ -355,14 +441,17 @@ static void sendTelemetry() {
   if (deviceId == 0 || WiFi.status() != WL_CONNECTED || !serverUrl.length()) return;
 
   HTTPClient http;
-  const String url = telemetryEndpointOverride.length() ? telemetryEndpointOverride : joinUrl(serverUrl, "/api/telemetry");
+  const String telemetryDefault = String(DEFAULT_HTTP_TELEMETRY_ENDPOINT).length()
+                                      ? DEFAULT_HTTP_TELEMETRY_ENDPOINT
+                                      : joinUrl(serverUrl, "/api/telemetry");
+  const String url = telemetryEndpointOverride.length() ? telemetryEndpointOverride : telemetryDefault;
 
   DynamicJsonDocument doc(TELEMETRY_JSON_CAPACITY);
   doc["device_id"] = deviceId;
   JsonObject telemetry = doc["telemetry"].to<JsonObject>();
   telemetry["voltage"] = 220.0;   // Ejemplo
   telemetry["current"] = 3.5;     // Ejemplo
-  telemetry["is_on"] = digitalRead(RELAY_PIN) == HIGH;
+  telemetry["is_on"] = relayIsOn();
 
   String payload;
   serializeJson(doc, payload);
@@ -405,6 +494,16 @@ static String htmlEscape(const String& value) {
 static String renderRootPage() {
   const bool wifiConnected = WiFi.status() == WL_CONNECTED;
   const IPAddress ip = wifiConnected ? WiFi.localIP() : WiFi.softAPIP();
+  const String stateUrlDisplay = stateEndpointOverride.length()
+                                     ? stateEndpointOverride
+                                     : (String(DEFAULT_HTTP_STATE_ENDPOINT).length()
+                                            ? DEFAULT_HTTP_STATE_ENDPOINT
+                                            : joinUrl(serverUrl, "/api/pump/state"));
+  const String telemetryUrlDisplay = telemetryEndpointOverride.length()
+                                         ? telemetryEndpointOverride
+                                         : (String(DEFAULT_HTTP_TELEMETRY_ENDPOINT).length()
+                                                ? DEFAULT_HTTP_TELEMETRY_ENDPOINT
+                                                : joinUrl(serverUrl, "/api/telemetry"));
 
   String html;
   html.reserve(2048);
@@ -442,15 +541,15 @@ static String renderRootPage() {
   html += "</li><li><strong>Token:</strong> ";
   html += htmlEscape(deviceToken);
   html += "</li><li><strong>Estado endpoint:</strong> <code>";
-  html += htmlEscape(stateEndpointOverride.length()? stateEndpointOverride : joinUrl(serverUrl, "/api/pump/state"));
+  html += htmlEscape(stateUrlDisplay);
   html += "</code></li><li><strong>Telemetría endpoint:</strong> <code>";
-  html += htmlEscape(telemetryEndpointOverride.length()? telemetryEndpointOverride : joinUrl(serverUrl, "/api/telemetry"));
+  html += htmlEscape(telemetryUrlDisplay);
   html += "</code></li><li><strong>Poll (ms):</strong> ";
   html += String(checkIntervalMs);
   html += "</li></ul></section>";
 
   html += "<section><h2>Estado del relé</h2><p>Actualmente: <strong>";
-  html += digitalRead(RELAY_PIN) == HIGH ? "ENCENDIDO" : "APAGADO";
+  html += relayIsOn() ? "ENCENDIDO" : "APAGADO";
   html += "</strong></p></section>";
 
   html += "</main></body></html>";
@@ -467,8 +566,39 @@ static void handleStatus() {
   doc["ip"] = (WiFi.status() == WL_CONNECTED ? WiFi.localIP() : WiFi.softAPIP()).toString();
   doc["server_url"] = serverUrl;
   doc["device_id"] = deviceId;
-  doc["relay_on"] = digitalRead(RELAY_PIN) == HIGH;
+  doc["relay_on"] = relayIsOn();
 
+  String body;
+  serializeJson(doc, body);
+  server.send(200, "application/json", body);
+}
+
+// Control manual del relé para pruebas: /relay?on=1|0 o /relay?toggle=1
+static void handleRelay() {
+  bool changed = false;
+  if (server.hasArg("toggle")) {
+    setRelay(!relayIsOn());
+    changed = true;
+  } else if (server.hasArg("on")) {
+    const String v = server.arg("on");
+    if (v == "1" || v.equalsIgnoreCase("true")) {
+      setRelay(true);
+      changed = true;
+    } else if (v == "0" || v.equalsIgnoreCase("false")) {
+      setRelay(false);
+      changed = true;
+    }
+  }
+
+  if (server.hasArg("redirect")) {
+    server.sendHeader("Location", "/");
+    server.send(302);
+    return;
+  }
+
+  DynamicJsonDocument doc(SMALL_JSON_CAPACITY);
+  doc["ok"] = changed;
+  doc["relay_on"] = relayIsOn();
   String body;
   serializeJson(doc, body);
   server.send(200, "application/json", body);
@@ -506,6 +636,7 @@ static void handleNotFound() {
 static void setupServer() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/status", HTTP_GET, handleStatus);
+  server.on("/relay", HTTP_GET, handleRelay);
   server.on("/configure", HTTP_POST, handleConfigure);
   server.onNotFound(handleNotFound);
   server.begin();
@@ -517,7 +648,6 @@ void setup() {
   secureClient.setInsecure(); // Accept all certificates for HTTPS requests
 
   pinMode(RELAY_PIN, OUTPUT);
-  pinMode(LED_PIN, OUTPUT);
   setRelay(false);
 
   loadPreferences();
