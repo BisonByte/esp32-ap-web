@@ -1,4 +1,5 @@
 // ESP32 Access Point + HTTP client example for Laravel backend
+// VERSIÓN CORREGIDA - Control de relé funcional
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -7,31 +8,36 @@
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
+#include <math.h>
 
 #include "DefaultBackendConfig.h"
 
 // ========== CONFIGURACIÓN ==========
 #ifndef AP_SSID
-#define AP_SSID "BisonByte-Setup"   // ✅ Cambia el nombre si quieres
+#define AP_SSID "BisonByte-Setup"
 #endif
 #ifndef AP_PASS
-#define AP_PASS "12345678"           // ✅ Cambia la contraseña si deseas
+#define AP_PASS "12345678"
 #endif
 #ifndef RELAY_PIN
-#define RELAY_PIN 2                   // ⚠️ Pon aquí el pin de tu relé
+#define RELAY_PIN 2  // GPIO2 - relé
 #endif
-#ifndef LED_PIN
-#define LED_PIN 4                     // ⚠️ Pon aquí el pin de tu LED indicador
-#endif
-// Overrides de pines para esta placa (terminal block):
-#undef RELAY_PIN
-#define RELAY_PIN 26  // D26 / GPIO26 - rele
-#undef LED_PIN  // LED indicador eliminado
+
 #ifndef RELAY_ACTIVE_HIGH
-#define RELAY_ACTIVE_HIGH 0 // 0 = activo en BAJO (modulos comunes)
+// La mayoría de módulos de relé para ESP32 son ACTIVO-BAJO.
+// 0 = activo en BAJO (IN a LOW enciende el relé) ← TU CASO
+// 1 = activo en ALTO  (IN a HIGH enciende el relé)
+// ⚠️ Si la luz verde no se apaga, usa: http://IP/relay?active_high=0
+#define RELAY_ACTIVE_HIGH 0
 #endif
+
+// ⚠️ CAMBIO IMPORTANTE: Desactivado por defecto para que el relé funcione
+#ifndef FORCE_RELAY_OFF
+#define FORCE_RELAY_OFF 0  // Cambiado de 1 a 0
+#endif
+
 #ifndef DEFAULT_WIFI_SSID
-#define DEFAULT_WIFI_SSID ""          // Defecto vacío: se rellenará desde .env o portal
+#define DEFAULT_WIFI_SSID ""
 #endif
 #ifndef DEFAULT_WIFI_PASS
 #define DEFAULT_WIFI_PASS ""
@@ -63,13 +69,14 @@
 // ===================================
 
 namespace {
-  constexpr unsigned long WIFI_TIMEOUT = 20000;   // 20 segundos para conectar
-  constexpr unsigned long CHECK_INTERVAL = 2000;  // Consultar estado cada 2 s (por defecto)
-  constexpr unsigned long TELEMETRY_INTERVAL = 15000; // Telemetría cada 15 s
+  constexpr unsigned long WIFI_TIMEOUT = 20000;
+  constexpr unsigned long CHECK_INTERVAL = 2000;
+  constexpr unsigned long TELEMETRY_INTERVAL = 15000;
   constexpr size_t SMALL_JSON_CAPACITY = 512;
   constexpr size_t TELEMETRY_JSON_CAPACITY = 768;
 
   Preferences prefs;
+  bool relayActiveHighRuntime = RELAY_ACTIVE_HIGH;
   WebServer server(80);
   WiFiClient plainClient;
   WiFiClientSecure secureClient;
@@ -81,7 +88,6 @@ namespace {
   String deviceName = "Bomba ESP32";
   uint32_t deviceId = 0;
 
-  // Directivas del servidor (config importada del backend)
   String stateEndpointOverride;
   String telemetryEndpointOverride;
   unsigned long checkIntervalMs = CHECK_INTERVAL;
@@ -91,6 +97,7 @@ namespace {
   unsigned long reconnectRequestAt = 0;
   unsigned long lastCheck = 0;
   unsigned long lastTelemetry = 0;
+  bool apPersist = false;
 }
 
 static String joinUrl(const String& base, const String& path) {
@@ -109,19 +116,42 @@ static void httpBegin(HTTPClient& http, const String& url) {
 }
 
 static inline bool relayIsOn() {
-#if RELAY_ACTIVE_HIGH
-  return digitalRead(RELAY_PIN) == HIGH;
-#else
-  return digitalRead(RELAY_PIN) == LOW;
-#endif
+  return relayActiveHighRuntime ? (digitalRead(RELAY_PIN) == HIGH)
+                                : (digitalRead(RELAY_PIN) == LOW);
 }
 
 static void setRelay(bool enabled) {
-#if RELAY_ACTIVE_HIGH
-  digitalWrite(RELAY_PIN, enabled ? HIGH : LOW);
-#else
-  digitalWrite(RELAY_PIN, enabled ? LOW : HIGH);
+#if FORCE_RELAY_OFF
+  Serial.println("⚠️ FORCE_RELAY_OFF está activo - relé bloqueado");
+  enabled = false;
 #endif
+  
+  if (relayActiveHighRuntime) {
+    digitalWrite(RELAY_PIN, enabled ? HIGH : LOW);
+  } else {
+    digitalWrite(RELAY_PIN, enabled ? LOW : HIGH);
+  }
+  
+  Serial.print("🔌 Relé ajustado a: ");
+  Serial.println(enabled ? "ENCENDIDO" : "APAGADO");
+}
+
+static bool parseBooleanLike(const JsonVariantConst& value, bool fallback = false) {
+  if (value.isNull()) return fallback;
+  if (value.is<bool>()) return value.as<bool>();
+  if (value.is<int>()) return value.as<int>() != 0;
+  if (value.is<long>()) return value.as<long>() != 0;
+  if (value.is<unsigned int>()) return value.as<unsigned int>() != 0;
+  if (value.is<unsigned long>()) return value.as<unsigned long>() != 0;
+  if (value.is<float>() || value.is<double>()) return fabs(value.as<double>()) > 0.000001;
+  if (value.is<const char*>()) {
+    String s = value.as<const char*>();
+    s.trim();
+    s.toLowerCase();
+    if (s == "1" || s == "true" || s == "on" || s == "encendido") return true;
+    if (s == "0" || s == "false" || s == "off" || s == "apagado") return false;
+  }
+  return fallback;
 }
 
 static void loadPreferences() {
@@ -134,8 +164,9 @@ static void loadPreferences() {
   stateEndpointOverride = prefs.getString("state_url", "");
   telemetryEndpointOverride = prefs.getString("telemetry_url", "");
   checkIntervalMs = prefs.getUInt("check_ms", CHECK_INTERVAL);
+  relayActiveHighRuntime = prefs.getBool("relay_ah", RELAY_ACTIVE_HIGH);
+  apPersist = prefs.getBool("ap_persist", false);
 
-  // Primer arranque: aplica valores por defecto si están definidos
   bool changed = false;
   if (!wifiSsid.length() && String(DEFAULT_WIFI_SSID).length()) {
     wifiSsid = DEFAULT_WIFI_SSID;
@@ -177,8 +208,8 @@ static void loadPreferences() {
     prefs.putUInt("check_ms", checkIntervalMs);
     changed = true;
   }
+  
 #ifdef OVERRIDE_NVS_WITH_DEFAULTS
-  // Fuerza la importación desde las defines de compilación en cada arranque
   bool forced = false;
   if (String(DEFAULT_WIFI_SSID).length() && wifiSsid != String(DEFAULT_WIFI_SSID)) {
     wifiSsid = DEFAULT_WIFI_SSID;
@@ -211,7 +242,6 @@ static void loadPreferences() {
     forced = true;
   }
   if (forced) {
-    // Reinicia el registro si cambió conectividad
     prefs.remove("device_token");
     prefs.putUInt("device_id", 0);
     deviceToken = "";
@@ -219,6 +249,7 @@ static void loadPreferences() {
     Serial.println("Preferencias forzadas desde build (OVERRIDE_NVS_WITH_DEFAULTS).");
   }
 #endif
+  
   if (changed) {
     Serial.println("Preferencias iniciales aplicadas desde valores por defecto.");
   }
@@ -308,7 +339,11 @@ static bool connectToWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.print("✓ WiFi conectado! IP: ");
     Serial.println(WiFi.localIP());
-    stopAccessPoint();
+    if (apPersist) {
+      startAccessPoint();
+    } else {
+      stopAccessPoint();
+    }
     return true;
   }
 
@@ -324,7 +359,11 @@ static void ensureWiFi() {
 
 static void ensureAccessPoint() {
   if (WiFi.status() == WL_CONNECTED) {
-    stopAccessPoint();
+    if (apPersist) {
+      startAccessPoint();
+    } else {
+      stopAccessPoint();
+    }
   } else {
     startAccessPoint();
   }
@@ -369,16 +408,18 @@ static void registerDevice() {
       Serial.print("Token: ");
       Serial.println(deviceToken);
 
-      // Importar configuración del backend (endpoints y frecuencia)
       if (res.containsKey("http")) {
         JsonObject httpCfg = res["http"].as<JsonObject>();
         const String stateUrl = httpCfg["state"].as<String>();
         const String telemetryUrl = httpCfg["telemetry"].as<String>();
         const unsigned long pollSeconds = httpCfg["poll_seconds"] | (checkIntervalMs / 1000UL);
         saveServerDirectives(stateUrl, telemetryUrl, pollSeconds);
-        Serial.print("HTTP state endpoint: "); Serial.println(stateEndpointOverride.length()? stateEndpointOverride : "(default)");
-        Serial.print("HTTP telemetry endpoint: "); Serial.println(telemetryEndpointOverride.length()? telemetryEndpointOverride : "(default)");
-        Serial.print("Poll interval (ms): "); Serial.println(checkIntervalMs);
+        Serial.print("HTTP state endpoint: "); 
+        Serial.println(stateEndpointOverride.length() ? stateEndpointOverride : "(default)");
+        Serial.print("HTTP telemetry endpoint: "); 
+        Serial.println(telemetryEndpointOverride.length() ? telemetryEndpointOverride : "(default)");
+        Serial.print("Poll interval (ms): "); 
+        Serial.println(checkIntervalMs);
       }
     } else {
       Serial.print("✗ Error parseando respuesta de registro: ");
@@ -420,9 +461,9 @@ static void checkPumpState() {
     DynamicJsonDocument doc(SMALL_JSON_CAPACITY);
     DeserializationError err = deserializeJson(doc, response);
     if (!err) {
-      const bool shouldRun = doc["should_run"] | false;
+      const bool shouldRun = parseBooleanLike(doc["should_run"], false);
       setRelay(shouldRun);
-      Serial.print("Estado bomba: ");
+      Serial.print("📡 Estado bomba del servidor: ");
       Serial.println(shouldRun ? "ENCENDIDA" : "APAGADA");
     } else {
       Serial.print("✗ Error parseando estado: ");
@@ -431,7 +472,8 @@ static void checkPumpState() {
   } else {
     Serial.print("✗ Error estado (HTTP ");
     Serial.print(httpCode);
-    Serial.println(")");
+    Serial.print("): ");
+    Serial.println(response);
   }
 
   http.end();
@@ -449,8 +491,8 @@ static void sendTelemetry() {
   DynamicJsonDocument doc(TELEMETRY_JSON_CAPACITY);
   doc["device_id"] = deviceId;
   JsonObject telemetry = doc["telemetry"].to<JsonObject>();
-  telemetry["voltage"] = 220.0;   // Ejemplo
-  telemetry["current"] = 3.5;     // Ejemplo
+  telemetry["voltage"] = 220.0;
+  telemetry["current"] = 3.5;
   telemetry["is_on"] = relayIsOn();
 
   String payload;
@@ -506,22 +548,49 @@ static String renderRootPage() {
                                                 : joinUrl(serverUrl, "/api/telemetry"));
 
   String html;
-  html.reserve(2048);
+  html.reserve(3072);
   html += "<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'>";
+  html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
   html += "<title>BisonByte Setup</title><style>body{font-family:sans-serif;margin:2rem;background:#f7f7f7;}";
-  html += "main{max-width:720px;margin:0 auto;background:#fff;padding:2rem;border-radius:1rem;box-shadow:0 1rem 2rem rgba(0,0,0,0.1);}label{display:block;margin-top:1rem;font-weight:600;}";
-  html += "input{width:100%;padding:.75rem;margin-top:.5rem;border:1px solid #ddd;border-radius:.5rem;}button{margin-top:1.5rem;padding:.75rem 1.5rem;border:none;border-radius:.5rem;background:#2563eb;color:#fff;font-size:1rem;cursor:pointer;}button:hover{background:#1d4ed8;}section{margin-top:2rem;}";
-  html += ".status{padding:1rem;background:#e0f2fe;border-radius:.75rem;}code{background:#e2e8f0;padding:.25rem .5rem;border-radius:.5rem;}</style></head><body><main>";
-  html += "<h1>BisonByte Setup</h1>";
+  html += "main{max-width:720px;margin:0 auto;background:#fff;padding:2rem;border-radius:1rem;box-shadow:0 1rem 2rem rgba(0,0,0,0.1);}";
+  html += "label{display:block;margin-top:1rem;font-weight:600;}";
+  html += "input{width:100%;padding:.75rem;margin-top:.5rem;border:1px solid #ddd;border-radius:.5rem;box-sizing:border-box;}";
+  html += "button,.btn{margin-top:1.5rem;padding:.75rem 1.5rem;border:none;border-radius:.5rem;background:#2563eb;color:#fff;font-size:1rem;cursor:pointer;text-decoration:none;display:inline-block;}";
+  html += "button:hover,.btn:hover{background:#1d4ed8;}";
+  html += ".btn-danger{background:#dc2626;}.btn-danger:hover{background:#b91c1c;}";
+  html += ".btn-success{background:#16a34a;}.btn-success:hover{background:#15803d;}";
+  html += "section{margin-top:2rem;}.status{padding:1rem;background:#e0f2fe;border-radius:.75rem;}";
+  html += "code{background:#e2e8f0;padding:.25rem .5rem;border-radius:.5rem;}";
+  html += ".relay-status{font-size:1.5rem;font-weight:bold;padding:1rem;border-radius:.5rem;text-align:center;}";
+  html += ".relay-on{background:#dcfce7;color:#16a34a;}.relay-off{background:#fee2e2;color:#dc2626;}";
+  html += ".controls{display:flex;gap:1rem;margin-top:1rem;flex-wrap:wrap;}";
+  html += "</style></head><body><main>";
+  html += "<h1>🔧 BisonByte Setup</h1>";
+  
   html += "<div class='status'><p><strong>Estado WiFi:</strong> ";
-  html += wifiConnected ? "Conectado" : "No conectado";
+  html += wifiConnected ? "✅ Conectado" : "❌ No conectado";
   html += "</p><p><strong>IP actual:</strong> ";
   html += ip.toString();
   html += "</p><p><strong>Servidor:</strong> <code>";
   html += htmlEscape(serverUrl);
-  html += "</code></p></div>";
+  html += "</code></p><p><strong>AP activo:</strong> ";
+  html += apMode ? "✅ Sí" : "❌ No";
+  html += " (persistencia: ";
+  html += apPersist ? "ON" : "OFF";
+  html += ")</p></div>";
 
-  html += "<section><h2>Configurar WiFi y servidor</h2><form method='POST' action='/configure'>";
+  html += "<section><h2>🔌 Control del Relé</h2>";
+  html += "<div class='relay-status ";
+  html += relayIsOn() ? "relay-on" : "relay-off";
+  html += "'>Estado: ";
+  html += relayIsOn() ? "🟢 ENCENDIDO" : "🔴 APAGADO";
+  html += "</div><div class='controls'>";
+  html += "<a href='/relay?on=1&redirect=1' class='btn btn-success'>Encender</a>";
+  html += "<a href='/relay?on=0&redirect=1' class='btn btn-danger'>Apagar</a>";
+  html += "<a href='/relay?toggle=1&redirect=1' class='btn'>Toggle</a>";
+  html += "</div></section>";
+
+  html += "<section><h2>⚙️ Configurar WiFi y Servidor</h2><form method='POST' action='/configure'>";
   html += "<label for='ssid'>WiFi SSID</label><input id='ssid' name='ssid' required value='";
   html += htmlEscape(wifiSsid.isEmpty() ? DEFAULT_WIFI_SSID : wifiSsid);
   html += "'>";
@@ -531,26 +600,24 @@ static String renderRootPage() {
   html += "<label for='server'>URL del servidor Laravel</label><input id='server' name='server' required value='";
   html += htmlEscape(serverUrl.isEmpty() ? DEFAULT_SERVER_URL : serverUrl);
   html += "'>";
-  html += "<button type='submit'>Guardar y conectar</button></form></section>";
+  html += "<button type='submit'>💾 Guardar y conectar</button></form></section>";
 
-  html += "<section><h2>Información del dispositivo</h2><ul>";
+  html += "<section><h2>📱 Información del dispositivo</h2><ul>";
   html += "<li><strong>MAC:</strong> ";
   html += WiFi.macAddress();
   html += "</li><li><strong>Device ID:</strong> ";
   html += String(deviceId);
   html += "</li><li><strong>Token:</strong> ";
-  html += htmlEscape(deviceToken);
+  html += htmlEscape(deviceToken.length() > 0 ? deviceToken.substring(0, 20) + "..." : "(no registrado)");
   html += "</li><li><strong>Estado endpoint:</strong> <code>";
   html += htmlEscape(stateUrlDisplay);
   html += "</code></li><li><strong>Telemetría endpoint:</strong> <code>";
   html += htmlEscape(telemetryUrlDisplay);
   html += "</code></li><li><strong>Poll (ms):</strong> ";
   html += String(checkIntervalMs);
+  html += "</li><li><strong>Lógica relé:</strong> ";
+  html += relayActiveHighRuntime ? "Activo-ALTO" : "Activo-BAJO";
   html += "</li></ul></section>";
-
-  html += "<section><h2>Estado del relé</h2><p>Actualmente: <strong>";
-  html += relayIsOn() ? "ENCENDIDO" : "APAGADO";
-  html += "</strong></p></section>";
 
   html += "</main></body></html>";
   return html;
@@ -567,13 +634,16 @@ static void handleStatus() {
   doc["server_url"] = serverUrl;
   doc["device_id"] = deviceId;
   doc["relay_on"] = relayIsOn();
+  doc["relay_active_high"] = relayActiveHighRuntime;
+  doc["ap_active"] = apMode;
+  doc["ap_persist"] = apPersist;
+  doc["force_relay_off"] = FORCE_RELAY_OFF;
 
   String body;
   serializeJson(doc, body);
   server.send(200, "application/json", body);
 }
 
-// Control manual del relé para pruebas: /relay?on=1|0 o /relay?toggle=1
 static void handleRelay() {
   bool changed = false;
   if (server.hasArg("toggle")) {
@@ -588,6 +658,13 @@ static void handleRelay() {
       setRelay(false);
       changed = true;
     }
+  } else if (server.hasArg("active_high")) {
+    const String v = server.arg("active_high");
+    const bool newVal = (v == "1" || v.equalsIgnoreCase("true"));
+    relayActiveHighRuntime = newVal;
+    prefs.putBool("relay_ah", relayActiveHighRuntime);
+    setRelay(relayIsOn());
+    changed = true;
   }
 
   if (server.hasArg("redirect")) {
@@ -599,6 +676,7 @@ static void handleRelay() {
   DynamicJsonDocument doc(SMALL_JSON_CAPACITY);
   doc["ok"] = changed;
   doc["relay_on"] = relayIsOn();
+  doc["relay_active_high"] = relayActiveHighRuntime;
   String body;
   serializeJson(doc, body);
   server.send(200, "application/json", body);
@@ -622,9 +700,13 @@ static void handleConfigure() {
   reconnectRequested = true;
   reconnectRequestAt = millis();
 
-  String body = "<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'><title>Configuración guardada</title></head><body><p>Configuración guardada. Intentando conectar a <strong>";
+  String body = "<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'>";
+  body += "<meta http-equiv='refresh' content='5;url=/'>";
+  body += "<title>Configuración guardada</title></head><body>";
+  body += "<p>✅ Configuración guardada. Intentando conectar a <strong>";
   body += htmlEscape(ssid);
-  body += "</strong>. Regresa a <a href='/'>inicio</a> para ver el estado.</p></body></html>";
+  body += "</strong>...</p><p>Serás redirigido en 5 segundos o haz clic <a href='/'>aquí</a>.</p>";
+  body += "</body></html>";
 
   server.send(200, "text/html; charset=utf-8", body);
 }
@@ -637,27 +719,87 @@ static void setupServer() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/relay", HTTP_GET, handleRelay);
+  
+  server.on("/ap", HTTP_GET, [](){
+    bool changed = false;
+    if (server.hasArg("on")) {
+      const String v = server.arg("on");
+      const bool wantOn = (v == "1" || v.equalsIgnoreCase("true"));
+      apPersist = wantOn;
+      prefs.putBool("ap_persist", apPersist);
+      if (apPersist) startAccessPoint(); 
+      else stopAccessPoint();
+      changed = true;
+    }
+    if (server.hasArg("redirect")) { 
+      server.sendHeader("Location", "/"); 
+      server.send(302); 
+      return; 
+    }
+    DynamicJsonDocument doc(SMALL_JSON_CAPACITY);
+    doc["ok"] = changed; 
+    doc["ap_active"] = apMode; 
+    doc["ap_persist"] = apPersist;
+    String body; 
+    serializeJson(doc, body); 
+    server.send(200, "application/json", body);
+  });
+  
   server.on("/configure", HTTP_POST, handleConfigure);
   server.onNotFound(handleNotFound);
   server.begin();
+  Serial.println("✓ Servidor web iniciado");
 }
 
 void setup() {
   Serial.begin(115200);
   delay(200);
-  secureClient.setInsecure(); // Accept all certificates for HTTPS requests
-
+  
+  // ⚠️ CRÍTICO: Configura el pin INMEDIATAMENTE después del Serial
+  // para minimizar el tiempo que el relé está en estado indefinido
   pinMode(RELAY_PIN, OUTPUT);
-  setRelay(false);
+  
+  // Para relé activo-bajo (el más común):
+  // HIGH = apagado (optoacoplador desactivado)
+  // LOW = encendido (optoacoplador activado)
+  // Forzamos HIGH para garantizar que arranca APAGADO
+  digitalWrite(RELAY_PIN, HIGH);
+  
+  // Pausa para estabilizar
+  delay(100);
+  
+  Serial.println("\n\n========================================");
+  Serial.println("🚀 BisonByte ESP32 - Iniciando...");
+  Serial.println("========================================");
+  
+  secureClient.setInsecure();
 
+  // Carga preferencias DESPUÉS de asegurar el estado del pin
   loadPreferences();
+
+  // Reaplica el estado apagado según la lógica configurada
+  setRelay(false);
+  
+  Serial.print("🔌 Pin del relé: GPIO");
+  Serial.println(RELAY_PIN);
+  Serial.print("🔌 Lógica del relé: ");
+  Serial.println(relayActiveHighRuntime ? "Activo-ALTO" : "Activo-BAJO");
+  
+#if FORCE_RELAY_OFF
+  Serial.println("⚠️ ADVERTENCIA: FORCE_RELAY_OFF está ACTIVO");
+  Serial.println("⚠️ El relé permanecerá bloqueado en OFF");
+  Serial.println("⚠️ Para habilitar el control, cambia FORCE_RELAY_OFF a 0");
+#endif
+
   if (!connectToWiFi()) {
     startAccessPoint();
   }
 
-  // Inicia el servidor web solo después de haber inicializado la pila WiFi
-  // (ya sea en modo STA o AP) para evitar errores de lwIP al arrancar.
   setupServer();
+  
+  Serial.println("========================================");
+  Serial.println("✓ Sistema listo");
+  Serial.println("========================================\n");
 }
 
 void loop() {
