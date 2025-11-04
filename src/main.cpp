@@ -27,7 +27,7 @@
 // Módulo de relé alimentado con 5V (VIN) - Lógica ACTIVO-ALTO
 // 0 = activo en BAJO (IN a LOW enciende el relé)
 // 1 = activo en ALTO (IN a HIGH enciende el relé) ← CONFIGURACIÓN CORRECTA PARA 5V
-#define RELAY_ACTIVE_HIGH 1 // <--- ¡ESTE ES EL CAMBIO!
+#define RELAY_ACTIVE_HIGH 0 // Invertido para probar lógica de relé activo-bajo
 #endif
 
 // ⚠️ CAMBIO IMPORTANTE: Desactivado por defecto para que el relé funcione
@@ -763,9 +763,9 @@ void setup() {
   
   pinMode(RELAY_PIN, OUTPUT);
   
-  // Para relé activo-ALTO con 5V:
-  // LOW = apagado
-  digitalWrite(RELAY_PIN, LOW);
+  // Para relé activo-BAJO:
+  // HIGH = apagado
+  digitalWrite(RELAY_PIN, HIGH);
   
   delay(100);
   
@@ -774,7 +774,7 @@ void setup() {
   Serial.println("🔌 Configuración: Relé con VCC=5V (VIN)");
   Serial.print("🔌 Pin GPIO: ");
   Serial.println(RELAY_PIN);
-  Serial.println("🔌 Lógica: ACTIVO-ALTO (HIGH=encendido)");
+  Serial.println("🔌 Lógica: ACTIVO-BAJO (LOW=encendido)");
   Serial.println("========================================");
   
   secureClient.setInsecure();
