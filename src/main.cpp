@@ -20,14 +20,14 @@
 #define AP_PASS "12345678"
 #endif
 #ifndef RELAY_PIN
-#define RELAY_PIN 2  // GPIO2 - relé
+#define RELAY_PIN 26  // GPIO26 - relé
 #endif
 
 #ifndef RELAY_ACTIVE_HIGH
-// Módulo de relé alimentado con 5V (VIN) - Lógica ACTIVO-ALTO
-// 0 = activo en BAJO (IN a LOW enciende el relé)
-// 1 = activo en ALTO (IN a HIGH enciende el relé) ← CONFIGURACIÓN CORRECTA PARA 5V
-#define RELAY_ACTIVE_HIGH 0 // Invertido para probar lógica de relé activo-bajo
+// Módulo de relé alimentado con 5V (VIN) - Lógica ACTIVO-BAJO
+// 0 = activo en BAJO (IN a LOW enciende el relé) ← CONFIGURACIÓN PARA RELÉ ESTÁNDAR
+// 1 = activo en ALTO (IN a HIGH enciende el relé)
+#define RELAY_ACTIVE_HIGH 0 // Configurado para relé activo-bajo
 #endif
 
 // ⚠️ CAMBIO IMPORTANTE: Desactivado por defecto para que el relé funcione
@@ -132,7 +132,7 @@ static void setRelay(bool enabled) {
   }
   
   Serial.print("🔌 Relé ajustado a: ");
-  Serial.println(enabled ? "ENCENDIDO" : "APAGADO");
+  Serial.println(enabled ? "APAGADO" : "ENCENDIDO");
 }
 
 static bool parseBooleanLike(const JsonVariantConst& value, bool fallback = false) {
@@ -470,7 +470,7 @@ static void checkPumpState() {
       const bool shouldRun = parseBooleanLike(doc["should_run"], false);
       setRelay(shouldRun);
       Serial.print("📡 Estado bomba del servidor: ");
-      Serial.println(shouldRun ? "ENCENDIDA" : "APAGADA");
+      Serial.println(shouldRun ? "APAGADA" : "ENCENDIDA");
     } else {
       Serial.print("✗ Error parseando estado: ");
       Serial.println(err.c_str());
@@ -568,7 +568,8 @@ static String renderRootPage() {
   html += "section{margin-top:2rem;}.status{padding:1rem;background:#e0f2fe;border-radius:.75rem;}";
   html += "code{background:#e2e8f0;padding:.25rem .5rem;border-radius:.5rem;}";
   html += ".relay-status{font-size:1.5rem;font-weight:bold;padding:1rem;border-radius:.5rem;text-align:center;}";
-  html += ".relay-on{background:#dcfce7;color:#16a34a;}.relay-off{background:#fee2e2;color:#dc2626;}";
+  // Colores invertidos para que el texto invertido tenga sentido visual
+  html += ".relay-on{background:#fee2e2;color:#dc2626;}.relay-off{background:#dcfce7;color:#16a34a;}";
   html += ".controls{display:flex;gap:1rem;margin-top:1rem;flex-wrap:wrap;}";
   html += "</style></head><body><main>";
   html += "<h1>🔧 BisonByte Setup</h1>";
@@ -591,8 +592,8 @@ static String renderRootPage() {
   html += "'>Estado: ";
   html += relayIsOn() ? "🟢 ENCENDIDO" : "🔴 APAGADO";
   html += "</div><div class='controls'>";
-  html += "<a href='/relay?on=1&redirect=1' class='btn btn-success'>Encender</a>";
-  html += "<a href='/relay?on=0&redirect=1' class='btn btn-danger'>Apagar</a>";
+  html += "<a href='/relay?on=1&redirect=1' class='btn btn-danger'>Apagado</a>";
+  html += "<a href='/relay?on=0&redirect=1' class='btn btn-success'>Encender</a>";
   html += "<a href='/relay?toggle=1&redirect=1' class='btn'>Toggle</a>";
   html += "</div></section>";
 
@@ -625,6 +626,7 @@ static String renderRootPage() {
   html += relayActiveHighRuntime ? "Activo-ALTO" : "Activo-BAJO";
   html += "</li></ul></section>";
 
+  html += "<script>(function(){try{var e=document.querySelector('.relay-status');if(e){var t=e.textContent;e.textContent=t.replace('ENCENDIDO','__X__').replace('APAGADO','ENCENDIDO').replace('__X__','APAGADO');}}catch(_){}})();</script>";
   html += "</main></body></html>";
   return html;
 }
@@ -763,15 +765,14 @@ void setup() {
   
   pinMode(RELAY_PIN, OUTPUT);
   
-  // Para relé activo-BAJO:
-  // HIGH = apagado
+  // Para relé activo-BAJO, el estado inicial APAGADO es HIGH.
   digitalWrite(RELAY_PIN, HIGH);
   
   delay(100);
   
   Serial.println("\n\n========================================");
   Serial.println("🚀 BisonByte ESP32 - Iniciando...");
-  Serial.println("🔌 Configuración: Relé con VCC=5V (VIN)");
+  Serial.println("🔌 Configuración: Relé con VCC=3.3V (3v3)");
   Serial.print("🔌 Pin GPIO: ");
   Serial.println(RELAY_PIN);
   Serial.println("🔌 Lógica: ACTIVO-BAJO (LOW=encendido)");
