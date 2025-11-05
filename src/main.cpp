@@ -42,7 +42,7 @@
 #define DEFAULT_WIFI_PASS ""
 #endif
 #ifndef DEFAULT_SERVER_URL
-#define DEFAULT_SERVER_URL "https://proyecto.bisonbyte.io"
+#define DEFAULT_SERVER_URL "https://www.google.com"
 #endif
 #ifndef DEFAULT_HTTP_ACTIVATION_ENDPOINT
 #define DEFAULT_HTTP_ACTIVATION_ENDPOINT ""
@@ -322,7 +322,7 @@ static void stopAccessPoint() {
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
   apMode = false;
-  Serial.println("Punto de acceso apagado (conexión WiFi activa)");
+  Serial.println("Punto de acceso encendido (conexión WiFi activa)");
 }
 
 static bool connectToWiFi() {
@@ -568,8 +568,7 @@ static String renderRootPage() {
   html += "section{margin-top:2rem;}.status{padding:1rem;background:#e0f2fe;border-radius:.75rem;}";
   html += "code{background:#e2e8f0;padding:.25rem .5rem;border-radius:.5rem;}";
   html += ".relay-status{font-size:1.5rem;font-weight:bold;padding:1rem;border-radius:.5rem;text-align:center;}";
-  // Colores invertidos para que el texto invertido tenga sentido visual
-  html += ".relay-on{background:#fee2e2;color:#dc2626;}.relay-off{background:#dcfce7;color:#16a34a;}";
+  html += ".relay-on{background:#dcfce7;color:#16a34a;}.relay-off{background:#fee2e2;color:#dc2626;}";
   html += ".controls{display:flex;gap:1rem;margin-top:1rem;flex-wrap:wrap;}";
   html += "</style></head><body><main>";
   html += "<h1>🔧 BisonByte Setup</h1>";
@@ -592,8 +591,8 @@ static String renderRootPage() {
   html += "'>Estado: ";
   html += relayIsOn() ? "🟢 ENCENDIDO" : "🔴 APAGADO";
   html += "</div><div class='controls'>";
-  html += "<a href='/relay?on=1&redirect=1' class='btn btn-danger'>Apagado</a>";
-  html += "<a href='/relay?on=0&redirect=1' class='btn btn-success'>Encender</a>";
+  html += "<a href='/relay?on=1&redirect=1' class='btn btn-success'>Apagado</a>";
+  html += "<a href='/relay?on=0&redirect=1' class='btn btn-danger'>Encender</a>";
   html += "<a href='/relay?toggle=1&redirect=1' class='btn'>Toggle</a>";
   html += "</div></section>";
 
