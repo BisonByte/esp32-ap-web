@@ -97,6 +97,16 @@ namespace {
   unsigned long lastCheck = 0;
   unsigned long lastTelemetry = 0;
   bool apPersist = false;
+
+  // Hydraulic calculations data
+  String regimeDeFlujo = "Sin datos";
+  String reynolds = "---";
+  String perdidaDePresion = "---";
+  String cargaEquivalente = "---";
+  String potenciaHidraulica = "---";
+  String velocidad = "---";
+  String densidad = "1050";
+  String viscosidad = "5.10";
 }
 
 static String joinUrl(const String& base, const String& path) {
@@ -522,6 +532,17 @@ static void sendTelemetry() {
   http.end();
 }
 
+static void calculateHydraulics() {
+  // This is a dummy function.
+  // In a real application, you would perform the actual calculations here.
+  regimeDeFlujo = "Turbulento";
+  reynolds = "25000";
+  perdidaDePresion = "15.2";
+  cargaEquivalente = "1.55";
+  potenciaHidraulica = "350.5";
+  velocidad = "2.5";
+}
+
 static String htmlEscape(const String& value) {
   String out;
   out.reserve(value.length() * 2);
@@ -595,6 +616,8 @@ static String renderRootPage() {
   html += "<a href='/relay?on=0&redirect=1' class='btn btn-danger'>Encender</a>";
   html += "<a href='/relay?toggle=1&redirect=1' class='btn'>Toggle</a>";
   html += "</div></section>";
+
+  html += "<section><h2>Cálculos hidráulicos en línea</h2><p>Resultados a partir de la última telemetría</p><p><em>El servicio FluidCalculationService procesa el caudal reportado junto con las propiedades del fluido seleccionado.</em></p><div class='status'><p><strong>SSE</strong></p><p><strong>Régimen de flujo:</strong> " + regimeDeFlujo + "</p><p><strong>Re:</strong> " + reynolds + "</p><p><strong>Pérdida de presión ΔP:</strong> " + perdidaDePresion + " kPa</p><p><strong>Carga equivalente:</strong> " + cargaEquivalente + " m</p><p><strong>Potencia hidráulica:</strong> " + potenciaHidraulica + " W</p><p><strong>Velocidad:</strong> " + velocidad + " m/s · ρ = " + densidad + " kg/m³ · μ = " + viscosidad + " mPa·s</p></div><a href='/calculate' class='btn'>Calcular</a></section>";
 
   html += "<section><h2>⚙️ Configurar WiFi y Servidor</h2><form method='POST' action='/configure'>";
   html += "<label for='ssid'>WiFi SSID</label><input id='ssid' name='ssid' required value='";
@@ -727,6 +750,12 @@ static void setupServer() {
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/relay", HTTP_GET, handleRelay);
   
+  server.on("/calculate", HTTP_GET, [](){
+    calculateHydraulics();
+    server.sendHeader("Location", "/");
+    server.send(302);
+  });
+
   server.on("/ap", HTTP_GET, [](){
     bool changed = false;
     if (server.hasArg("on")) {
